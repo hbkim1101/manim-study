@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+media/
+mfput.log
+
+# 렌더링/디버그 과정에서 생성된 임시 이미지 파일
+*.png
+!.vscode/**/*.png
