@@ -17,12 +17,30 @@ __all__ = [
 ]
 
 
+def _find_problem_page(pdf_path: str | Path, problem_number: int) -> int:
+    """문제 번호가 등장하는 첫 페이지 번호(0부터 시작)를 문서 전체에서 찾습니다."""
+    doc = pymupdf.open(str(pdf_path))
+    try:
+        for page_number in range(len(doc)):
+            for block in doc[page_number].get_text("dict")["blocks"]:
+                if block["type"] != 0:
+                    continue
+                for line in block["lines"]:
+                    text = "".join(span["text"] for span in line["spans"])
+                    match = re.match(r"\s*(\d+)\.", text)
+                    if match and int(match.group(1)) == problem_number:
+                        return page_number
+    finally:
+        doc.close()
+    raise ValueError(f"문제 번호 {problem_number}번을 문서 전체에서 찾지 못했습니다.")
+
+
 def auto_problem_region(
     pdf_path: str | Path,
     page_number: int = 0,
     problem_number: int = 1,
     padding_x: float = 10,
-    padding_y: float = 20,
+    padding_y: float = 0,
     paragraph_gap: float = 80,
 ) -> pymupdf.Rect:
     """문제 번호와 2단 편집 열을 기준으로 문제 영역을 자동 검출합니다."""
@@ -110,11 +128,14 @@ def auto_problem_region(
     content = list(selected_lines)
     for drawing in page.get_drawings():
         original = drawing["rect"]
-        if original.height > band.height * 0.8 or original.width > page.rect.width * 0.8:
+        if original.height > page.rect.height * 0.5 or original.width > page.rect.width * 0.8:
             continue
-        clipped = original & band
-        if not clipped.is_empty:
-            content.append(clipped)
+        # 조건 박스 테두리는 두께 0인 선분(zero-area rect)으로 쪼개져 있어
+        # Rect.intersects()가 항상 False를 반환하므로, 구간 겹침을 직접 계산한다.
+        overlaps_x = original.x0 <= band.x1 and original.x1 >= band.x0
+        overlaps_y = original.y0 <= band.y1 and original.y1 >= band.y0
+        if overlaps_x and overlaps_y:
+            content.append(original)
 
     result = pymupdf.Rect(
         min(rect.x0 for rect in content) - padding_x,
@@ -129,13 +150,22 @@ def auto_problem_region(
 def pdf_problem_image(
     pdf_path: str | Path,
     problem_number: int = 1,
-    page_number: int = 0,
+    page_number: int | None = None,
     output_path: str | Path | None = None,
     dpi: int = 300,
     target_width: float | None = None,
+    padding_x: float = 10,
+    padding_y: float = 0,
 ) -> ImageMobject:
-    """문항 번호로 문제를 자동 검출하고 원본 PDF 글꼴 그대로 ImageMobject로 반환합니다."""
-    region = auto_problem_region(pdf_path, page_number, problem_number)
+    """문항 번호로 문제를 자동 검출하고 원본 PDF 글꼴 그대로 ImageMobject로 반환합니다.
+
+    page_number를 생략(None)하면 문서 전체를 훑어 문제 번호가 있는 페이지를 자동으로 찾습니다.
+    """
+    if page_number is None:
+        page_number = _find_problem_page(pdf_path, problem_number)
+    region = auto_problem_region(
+        pdf_path, page_number, problem_number, padding_x=padding_x, padding_y=padding_y
+    )
     if target_width is None:
         target_width = config.frame_width - 1
     if output_path is None:
@@ -152,6 +182,11 @@ def pdf_problem_image(
 
     image = ImageMobject(str(output_path))
     image.scale_to_fit_width(target_width)
+    max_height = config.frame_height - 1
+    if image.height > max_height:
+        # 세로로 긴 문제(박스형 조건 등)는 가로 기준으로 맞추면 화면 밖으로 잘려나가므로
+        # 세로 기준으로 다시 맞춘다.
+        image.scale_to_fit_height(max_height)
     image.move_to([0, 0, 0])
     return image
 
@@ -219,12 +254,17 @@ def pdf_page_to_manim_group(
 def pdf_problem_chars(
     pdf_path: str | Path,
     problem_number: int = 1,
-    page_number: int = 0,
+    page_number: int | None = None,
     dpi: int = 300,
     char_padding: float = 0.15,
     target_width: float | None = None,
 ) -> Group:
-    """문항 번호로 찾은 문제를 PDF 문자 단위 ImageMobject 그룹으로 추출합니다."""
+    """문항 번호로 찾은 문제를 PDF 문자 단위 ImageMobject 그룹으로 추출합니다.
+
+    page_number를 생략(None)하면 문서 전체를 훑어 문제 번호가 있는 페이지를 자동으로 찾습니다.
+    """
+    if page_number is None:
+        page_number = _find_problem_page(pdf_path, problem_number)
     region = auto_problem_region(pdf_path, page_number, problem_number)
     doc = pymupdf.open(str(pdf_path))
     page = doc[page_number]
